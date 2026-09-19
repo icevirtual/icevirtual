@@ -27,19 +27,18 @@ function saveDB() {
   }
 }
 
-// 1. Register Orb
+// 1. Orb Registration
 app.post('/api/register-orb', (req, res) => {
   const { ownerId, orbUrl, parcelName, region } = req.body;
   if (!ownerId || !orbUrl) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
-  db.devices[ownerId] = {
-    orbUrl,
-    parcelName: parcelName || "Unknown Parcel",
-    region: region || "Unknown Region",
-    lastSeen: new Date().toISOString()
-  };
+  if (!db.devices[ownerId]) db.devices[ownerId] = {};
+  db.devices[ownerId].orbUrl = orbUrl;
+  db.devices[ownerId].parcelName = parcelName || "Unknown Parcel";
+  db.devices[ownerId].region = region || "Unknown Region";
+  db.devices[ownerId].lastSeen = new Date().toISOString();
   saveDB();
 
   console.log(`[ORB REGISTERED] Owner: ${ownerId} | URL: ${orbUrl}`);
@@ -51,10 +50,7 @@ app.post('/api/update-live-presence', (req, res) => {
   const { ownerId, onlineAvatars } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
 
-  if (!db.devices[ownerId]) {
-    db.devices[ownerId] = { orbUrl: "", parcelName: "Unknown", region: "Unknown" };
-  }
-
+  if (!db.devices[ownerId]) db.devices[ownerId] = { orbUrl: "", parcelName: "Unknown", region: "Unknown" };
   db.devices[ownerId].onlineAvatars = Array.isArray(onlineAvatars) ? onlineAvatars : [];
   db.devices[ownerId].lastPresenceUpdate = new Date().toISOString();
   saveDB();
@@ -62,7 +58,7 @@ app.post('/api/update-live-presence', (req, res) => {
   res.json({ status: "success" });
 });
 
-// 3. Record Event
+// 3. Record Event & Discord Relay
 app.post('/api/record-event', async (req, res) => {
   const { ownerId, eventType, avatarName, reason } = req.body;
   if (!ownerId || !avatarName) return res.status(400).json({ error: "Missing fields" });
@@ -113,14 +109,14 @@ app.post('/api/record-event', async (req, res) => {
         body: JSON.stringify(discordPayload)
       });
     } catch (err) {
-      console.error("Discord send failed:", err);
+      console.error("Discord relay error:", err);
     }
   }
 
   res.json({ status: "success" });
 });
 
-// 4. Remote Kick
+// 4. Remote Kick Action
 app.post('/api/manual-action', async (req, res) => {
   const { ownerId, targetName } = req.body;
   const device = db.devices[ownerId];
@@ -142,7 +138,7 @@ app.post('/api/manual-action', async (req, res) => {
   }
 });
 
-// 5. Get Settings
+// 5. Get Settings & Status (Orb Polling Endpoint)
 app.get('/api/settings', (req, res) => {
   const ownerId = req.query.id;
   if (!ownerId) {
@@ -153,6 +149,11 @@ app.get('/api/settings', (req, res) => {
   const settings = db.settings[ownerId] || {};
   const logs = db.logs[ownerId] || [];
 
+  let cleanWhitelist = [];
+  if (Array.isArray(settings.whitelist)) {
+    cleanWhitelist = settings.whitelist.map(s => String(s).trim().toLowerCase()).filter(s => s.length > 0);
+  }
+
   res.json({
     status: "success",
     orbConnected: !!device.orbUrl,
@@ -161,11 +162,19 @@ app.get('/api/settings', (req, res) => {
     onlineAvatars: device.onlineAvatars || [],
     totalVisits: logs.length,
     visitorLogs: logs.slice(0, 30),
-    config: settings
+    config: settings,
+    // Orb doğrudan buradan senkronize olabilir:
+    syncData: {
+      mode: settings.mode || "lockdown",
+      action: settings.action || "eject",
+      enableCountdown: settings.enableCountdown === 1 || settings.enableCountdown === true,
+      countdown: Number(settings.countdown || 10),
+      whitelistPipe: cleanWhitelist.join("|")
+    }
   });
 });
 
-// 6. Save Settings & Push to Orb
+// 6. Save Settings (Push to Orb with Offline Fallback)
 app.post('/api/settings', async (req, res) => {
   const { ownerId } = req.query;
   const settings = req.body;
@@ -177,38 +186,39 @@ app.post('/api/settings', async (req, res) => {
   saveDB();
 
   const device = db.devices[targetId];
+  let cleanWhitelist = [];
+  if (Array.isArray(settings.whitelist)) {
+    cleanWhitelist = settings.whitelist.map(s => String(s).trim().toLowerCase()).filter(s => s.length > 0);
+  }
+  const whitelistPipe = cleanWhitelist.join("|");
+
   if (device && device.orbUrl) {
     try {
-      let cleanWhitelist = [];
-      if (Array.isArray(settings.whitelist)) {
-        cleanWhitelist = settings.whitelist.map(s => String(s).trim().toLowerCase()).filter(s => s.length > 0);
-      }
-      const whitelistStr = cleanWhitelist.join("|"); // Virgül yerine çakışmasız boru (|) karakteri
-
       const slRes = await fetch(device.orbUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "SYNC_SETTINGS",
-          active: (settings.mode === "lockdown").toString(),
           mode: settings.mode,
           actionType: settings.action,
           enableCountdown: (settings.enableCountdown === 1 || settings.enableCountdown === true).toString(),
           countdownSeconds: Number(settings.countdown || 10).toString(),
-          whitelist: whitelistStr
-        })
+          whitelist: whitelistPipe
+        }),
+        timeout: 4000
       });
       const slData = await slRes.json();
       return res.json({ status: "success", orbResponse: slData });
     } catch (e) {
-      return res.json({ status: "warning", error: "Saved locally, orb unreachable" });
+      // Orb o milisaniyede meşgulse bile ayar DB'de kayıtlı; orb 10 saniye içinde kendisi çekecek
+      return res.json({ status: "success", message: "Saved to cloud. Orb will fetch on next sync." });
     }
   }
 
-  res.json({ status: "warning", error: "Saved locally, orb not registered yet" });
+  res.json({ status: "success", message: "Saved to cloud. Waiting for orb registration." });
 });
 
-// 7. Discord Test
+// 7. Discord Webhook Test
 app.post('/api/test-discord', async (req, res) => {
   const { webhookUrl, ownerId } = req.body;
   if (!webhookUrl) return res.status(400).json({ error: "Missing webhook URL" });
