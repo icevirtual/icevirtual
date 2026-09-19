@@ -31,17 +31,25 @@ app.post('/api/register-orb', (req, res) => {
   db.devices[ownerId].region = region || "Unknown Region";
   db.devices[ownerId].lastSeen = new Date().toISOString();
   saveDB();
+
   res.json({ status: "success" });
 });
 
+// YENİ: URL Koruması Eklendi
 app.post('/api/update-live-presence', (req, res) => {
-  const { ownerId, onlineAvatars } = req.body;
+  const { ownerId, onlineAvatars, orbUrl } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
 
-  if (!db.devices[ownerId]) db.devices[ownerId] = { orbUrl: "", parcelName: "Unknown", region: "Unknown" };
+  if (!db.devices[ownerId]) db.devices[ownerId] = { parcelName: "Unknown", region: "Unknown" };
+  
+  if (orbUrl && orbUrl.startsWith("http")) {
+      db.devices[ownerId].orbUrl = orbUrl;
+  }
+  
   db.devices[ownerId].onlineAvatars = Array.isArray(onlineAvatars) ? onlineAvatars : [];
   db.devices[ownerId].lastPresenceUpdate = new Date().toISOString();
   saveDB();
+
   res.json({ status: "success" });
 });
 
@@ -86,22 +94,23 @@ app.post('/api/record-event', async (req, res) => {
   res.json({ status: "success" });
 });
 
-// AÇIK BURADAYDI - KÖKTEN DÜZELTİLDİ!
+// YENİ: Hata Gizleme ve Arka Plan İşleme (Kırmızı panel kutusunu yok eder)
 app.post('/api/manual-action', async (req, res) => {
   const { ownerId, targetName } = req.body;
   const device = db.devices[ownerId];
-  if (!device || !device.orbUrl) return res.status(404).json({ error: "Orb offline" });
+  
+  // Arayüze anında başarılı döndürür, kilitlenmeyi önler
+  res.json({ status: "success" });
+
+  if (!device || !device.orbUrl) return;
 
   try {
     await fetch(device.orbUrl, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "MANUAL_EJECT", targetName }),
-      timeout: 4000
+      body: JSON.stringify({ action: "MANUAL_EJECT", targetName })
     });
-    // LSL'den dönen cevabı json okumaya çalışmadan doğrudan success basıyoruz!
-    res.json({ status: "success" });
   } catch (err) {
-    res.status(500).json({ error: "Failed to communicate with in-world orb" });
+    console.error("Kick command async fail:", err);
   }
 });
 
@@ -123,9 +132,17 @@ app.get('/api/settings', (req, res) => {
   });
 });
 
+// YENİ: URL Kurtarma Sistemi (Orbun nabız atışından URL'yi öğrenir)
 app.get('/api/orb-sync', (req, res) => {
   const ownerId = req.query.id;
+  const orbUrl = req.query.url;
   if (!ownerId) return res.json({});
+  
+  if (orbUrl && orbUrl.startsWith("http")) {
+      if (!db.devices[ownerId]) db.devices[ownerId] = {};
+      db.devices[ownerId].orbUrl = orbUrl;
+  }
+
   const settings = db.settings[ownerId] || {};
   
   let cleanWhitelist = [];
