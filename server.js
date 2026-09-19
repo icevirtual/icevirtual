@@ -10,7 +10,6 @@ app.use(express.json());
 
 const DB_FILE = path.join(__dirname, 'database.json');
 
-// Persistent storage loader
 let db = { devices: {}, settings: {}, logs: {} };
 if (fs.existsSync(DB_FILE)) {
   try {
@@ -28,7 +27,7 @@ function saveDB() {
   }
 }
 
-// 1. Orb Registration
+// 1. Register Orb
 app.post('/api/register-orb', (req, res) => {
   const { ownerId, orbUrl, parcelName, region } = req.body;
   if (!ownerId || !orbUrl) {
@@ -47,7 +46,7 @@ app.post('/api/register-orb', (req, res) => {
   res.json({ status: "success" });
 });
 
-// 2. Live Presence Sync (Radar)
+// 2. Live Presence
 app.post('/api/update-live-presence', (req, res) => {
   const { ownerId, onlineAvatars } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
@@ -63,7 +62,7 @@ app.post('/api/update-live-presence', (req, res) => {
   res.json({ status: "success" });
 });
 
-// 3. Record Event & Discord Relay
+// 3. Record Event
 app.post('/api/record-event', async (req, res) => {
   const { ownerId, eventType, avatarName, reason } = req.body;
   if (!ownerId || !avatarName) return res.status(400).json({ error: "Missing fields" });
@@ -83,7 +82,6 @@ app.post('/api/record-event', async (req, res) => {
   if (db.logs[ownerId].length > 100) db.logs[ownerId].pop();
   saveDB();
 
-  // Discord Relay
   const userSettings = db.settings[ownerId] || {};
   const webhookUrl = userSettings.discordWebhook;
 
@@ -91,7 +89,7 @@ app.post('/api/record-event', async (req, res) => {
     try {
       const isBreach = (eventType === "breach");
       const title = isBreach ? "🚨 Intruder Ejected" : "🟢 Visitor Detected";
-      const color = isBreach ? 0xff3b30 : 0x00e676; // Red or Emerald Green
+      const color = isBreach ? 0xff3b30 : 0x00e676;
       const device = db.devices[ownerId] || { parcelName: "Parcel", region: "Region" };
 
       const discordPayload = {
@@ -122,7 +120,7 @@ app.post('/api/record-event', async (req, res) => {
   res.json({ status: "success" });
 });
 
-// 4. Remote Kick Action
+// 4. Remote Kick
 app.post('/api/manual-action', async (req, res) => {
   const { ownerId, targetName } = req.body;
   const device = db.devices[ownerId];
@@ -144,7 +142,7 @@ app.post('/api/manual-action', async (req, res) => {
   }
 });
 
-// 5. Get Settings & Dashboard Status
+// 5. Get Settings
 app.get('/api/settings', (req, res) => {
   const ownerId = req.query.id;
   if (!ownerId) {
@@ -167,7 +165,7 @@ app.get('/api/settings', (req, res) => {
   });
 });
 
-// 6. Save Settings (Pushes to in-world orb)
+// 6. Save Settings & Push to Orb
 app.post('/api/settings', async (req, res) => {
   const { ownerId } = req.query;
   const settings = req.body;
@@ -181,7 +179,12 @@ app.post('/api/settings', async (req, res) => {
   const device = db.devices[targetId];
   if (device && device.orbUrl) {
     try {
-      const whitelistStr = Array.isArray(settings.whitelist) ? settings.whitelist.join(",") : "";
+      let cleanWhitelist = [];
+      if (Array.isArray(settings.whitelist)) {
+        cleanWhitelist = settings.whitelist.map(s => String(s).trim().toLowerCase()).filter(s => s.length > 0);
+      }
+      const whitelistStr = cleanWhitelist.join("|"); // Virgül yerine çakışmasız boru (|) karakteri
+
       const slRes = await fetch(device.orbUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -190,6 +193,8 @@ app.post('/api/settings', async (req, res) => {
           active: (settings.mode === "lockdown").toString(),
           mode: settings.mode,
           actionType: settings.action,
+          enableCountdown: (settings.enableCountdown === 1 || settings.enableCountdown === true).toString(),
+          countdownSeconds: Number(settings.countdown || 10).toString(),
           whitelist: whitelistStr
         })
       });
@@ -203,7 +208,7 @@ app.post('/api/settings', async (req, res) => {
   res.json({ status: "warning", error: "Saved locally, orb not registered yet" });
 });
 
-// 7. Discord Webhook Test
+// 7. Discord Test
 app.post('/api/test-discord', async (req, res) => {
   const { webhookUrl, ownerId } = req.body;
   if (!webhookUrl) return res.status(400).json({ error: "Missing webhook URL" });
