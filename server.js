@@ -63,13 +63,19 @@ app.post('/api/record-event', async (req, res) => {
   const userSettings = db.settings[ownerId] || {};
   const webhookUrl = userSettings.discordWebhook;
 
-  if (webhookUrl && webhookUrl.startsWith("https://discord.com/api/webhooks/")) {
+  // ÇÖZÜM BURADA: Boşlukları kırpar, katı URL kuralını esnetir ve Discord bot kimliğini ekler
+  if (webhookUrl && webhookUrl.includes("webhooks")) {
     try {
       const isBreach = (eventType === "breach");
       const device = db.devices[ownerId] || { parcelName: "Parcel", region: "Region" };
-      await fetch(webhookUrl, {
-        method: "POST", headers: { "Content-Type": "application/json" },
+      await fetch(webhookUrl.trim(), {
+        method: "POST", 
+        headers: { 
+            "Content-Type": "application/json",
+            "User-Agent": "ICE-Security-Bot/1.0"
+        },
         body: JSON.stringify({
+          content: null,
           embeds: [{
             title: isBreach ? "🚨 Intruder Ejected" : "🟢 Visitor Detected",
             color: isBreach ? 0xff3b30 : 0x00e676,
@@ -83,12 +89,13 @@ app.post('/api/record-event', async (req, res) => {
           }]
         })
       });
-    } catch (err) {}
+    } catch (err) {
+        console.error("Discord send failed:", err);
+    }
   }
   res.json({ status: "success" });
 });
 
-// YENİ: KİCK KUYRUĞU (Asla Kaçırmaz)
 app.post('/api/manual-action', async (req, res) => {
   const { ownerId, targetName } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ID" });
@@ -96,15 +103,12 @@ app.post('/api/manual-action', async (req, res) => {
   if (!db.devices[ownerId]) db.devices[ownerId] = {};
   const device = db.devices[ownerId];
 
-  // Hedefi deftere (kuyruğa) yaz
   device.kickQueue = device.kickQueue || [];
   device.kickQueue.push(targetName);
   saveDB();
 
-  // Panele hemen başarılı de
   res.json({ status: "success" });
 
-  // SL'e anında dürtmeyi dene, başarısız olursa sorun değil, 10 saniye içinde kendi çekecek
   if (device.orbUrl) {
     try {
       await fetch(device.orbUrl, {
@@ -151,7 +155,6 @@ app.get('/api/orb-sync', (req, res) => {
     cleanWhitelist = settings.whitelist.map(s => String(s).trim().toLowerCase()).filter(s => s.length > 0);
   }
 
-  // Kuyrukta atılacak adam varsa orba ver ve listeden sil
   let kickTarget = "";
   if (device.kickQueue && device.kickQueue.length > 0) {
       kickTarget = device.kickQueue.shift();
@@ -164,7 +167,7 @@ app.get('/api/orb-sync', (req, res) => {
     e: (settings.enableCountdown === 1 || settings.enableCountdown === true) ? 1 : 0,
     c: parseInt(settings.countdown) || 10,
     w: cleanWhitelist.join("|"),
-    k: kickTarget // Orba giden KICK emri
+    k: kickTarget
   });
 });
 
@@ -194,16 +197,32 @@ app.post('/api/settings', async (req, res) => {
 
 app.post('/api/test-discord', async (req, res) => {
   const { webhookUrl, ownerId } = req.body;
-  if (!webhookUrl) return res.status(400).json({ error: "Missing webhook URL" });
+  if (!webhookUrl || !webhookUrl.includes("webhooks")) {
+      return res.status(400).json({ error: "Invalid Discord Webhook URL" });
+  }
+  
   try {
-    const dRes = await fetch(webhookUrl, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ embeds: [{ title: "🛡️ ICE Security Test", color: 0x00bcd4 }] })
+    const dRes = await fetch(webhookUrl.trim(), {
+      method: "POST", 
+      headers: { 
+          "Content-Type": "application/json",
+          "User-Agent": "ICE-Security-Bot/1.0"
+      },
+      body: JSON.stringify({ 
+          content: null,
+          embeds: [{ 
+              title: "🛡️ ICE Security Test", 
+              description: "Your Discord webhook is working perfectly!",
+              color: 0x00bcd4 
+          }] 
+      })
     });
+    
     if (dRes.ok) return res.json({ status: "success" });
-    return res.status(400).json({ error: "Rejected" });
+    const errorText = await dRes.text();
+    return res.status(400).json({ error: "Discord rejected request: " + errorText });
   } catch (e) {
-    res.status(500).json({ error: "Network error" });
+    res.status(500).json({ error: "Network error to Discord" });
   }
 });
 
