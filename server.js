@@ -31,25 +31,19 @@ app.post('/api/register-orb', (req, res) => {
   db.devices[ownerId].region = region || "Unknown Region";
   db.devices[ownerId].lastSeen = new Date().toISOString();
   saveDB();
-
   res.json({ status: "success" });
 });
 
-// YENİ: URL Koruması Eklendi
 app.post('/api/update-live-presence', (req, res) => {
   const { ownerId, onlineAvatars, orbUrl } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
 
   if (!db.devices[ownerId]) db.devices[ownerId] = { parcelName: "Unknown", region: "Unknown" };
-  
-  if (orbUrl && orbUrl.startsWith("http")) {
-      db.devices[ownerId].orbUrl = orbUrl;
-  }
+  if (orbUrl && orbUrl.startsWith("http")) db.devices[ownerId].orbUrl = orbUrl;
   
   db.devices[ownerId].onlineAvatars = Array.isArray(onlineAvatars) ? onlineAvatars : [];
   db.devices[ownerId].lastPresenceUpdate = new Date().toISOString();
   saveDB();
-
   res.json({ status: "success" });
 });
 
@@ -94,23 +88,31 @@ app.post('/api/record-event', async (req, res) => {
   res.json({ status: "success" });
 });
 
-// YENİ: Hata Gizleme ve Arka Plan İşleme (Kırmızı panel kutusunu yok eder)
+// YENİ: KİCK KUYRUĞU (Asla Kaçırmaz)
 app.post('/api/manual-action', async (req, res) => {
   const { ownerId, targetName } = req.body;
+  if (!ownerId) return res.status(400).json({ error: "Missing ID" });
+
+  if (!db.devices[ownerId]) db.devices[ownerId] = {};
   const device = db.devices[ownerId];
-  
-  // Arayüze anında başarılı döndürür, kilitlenmeyi önler
+
+  // Hedefi deftere (kuyruğa) yaz
+  device.kickQueue = device.kickQueue || [];
+  device.kickQueue.push(targetName);
+  saveDB();
+
+  // Panele hemen başarılı de
   res.json({ status: "success" });
 
-  if (!device || !device.orbUrl) return;
-
-  try {
-    await fetch(device.orbUrl, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "MANUAL_EJECT", targetName })
-    });
-  } catch (err) {
-    console.error("Kick command async fail:", err);
+  // SL'e anında dürtmeyi dene, başarısız olursa sorun değil, 10 saniye içinde kendi çekecek
+  if (device.orbUrl) {
+    try {
+      await fetch(device.orbUrl, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "MANUAL_EJECT", targetName }),
+        timeout: 2000
+      });
+    } catch (err) {}
   }
 });
 
@@ -132,16 +134,15 @@ app.get('/api/settings', (req, res) => {
   });
 });
 
-// YENİ: URL Kurtarma Sistemi (Orbun nabız atışından URL'yi öğrenir)
 app.get('/api/orb-sync', (req, res) => {
   const ownerId = req.query.id;
   const orbUrl = req.query.url;
   if (!ownerId) return res.json({});
   
-  if (orbUrl && orbUrl.startsWith("http")) {
-      if (!db.devices[ownerId]) db.devices[ownerId] = {};
-      db.devices[ownerId].orbUrl = orbUrl;
-  }
+  if (!db.devices[ownerId]) db.devices[ownerId] = {};
+  const device = db.devices[ownerId];
+
+  if (orbUrl && orbUrl.startsWith("http")) device.orbUrl = orbUrl;
 
   const settings = db.settings[ownerId] || {};
   
@@ -150,12 +151,20 @@ app.get('/api/orb-sync', (req, res) => {
     cleanWhitelist = settings.whitelist.map(s => String(s).trim().toLowerCase()).filter(s => s.length > 0);
   }
 
+  // Kuyrukta atılacak adam varsa orba ver ve listeden sil
+  let kickTarget = "";
+  if (device.kickQueue && device.kickQueue.length > 0) {
+      kickTarget = device.kickQueue.shift();
+      saveDB();
+  }
+
   res.json({
     m: settings.mode || "lockdown",
     a: settings.action || "eject",
     e: (settings.enableCountdown === 1 || settings.enableCountdown === true) ? 1 : 0,
     c: parseInt(settings.countdown) || 10,
-    w: cleanWhitelist.join("|")
+    w: cleanWhitelist.join("|"),
+    k: kickTarget // Orba giden KICK emri
   });
 });
 
@@ -173,7 +182,7 @@ app.post('/api/settings', async (req, res) => {
     try {
       await fetch(device.orbUrl, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "TRIGGER_SYNC" }), timeout: 3000
+        body: JSON.stringify({ action: "TRIGGER_SYNC" }), timeout: 2000
       });
       return res.json({ status: "success", message: "Saved and triggered sync instantly." });
     } catch (e) {
