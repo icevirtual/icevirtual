@@ -12,19 +12,13 @@ const DB_FILE = path.join(__dirname, 'database.json');
 
 let db = { devices: {}, settings: {}, logs: {} };
 if (fs.existsSync(DB_FILE)) {
-  try {
-    db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-  } catch (e) {
-    console.error("DB Load error:", e);
-  }
+  try { db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } 
+  catch (e) { console.error("DB Load error:", e); }
 }
 
 function saveDB() {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
-  } catch (e) {
-    console.error("DB Save error:", e);
-  }
+  try { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); } 
+  catch (e) { console.error("DB Save error:", e); }
 }
 
 app.post('/api/register-orb', (req, res) => {
@@ -74,8 +68,7 @@ app.post('/api/record-event', async (req, res) => {
       const isBreach = (eventType === "breach");
       const device = db.devices[ownerId] || { parcelName: "Parcel", region: "Region" };
       await fetch(webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           embeds: [{
             title: isBreach ? "🚨 Intruder Ejected" : "🟢 Visitor Detected",
@@ -129,7 +122,7 @@ app.get('/api/settings', (req, res) => {
   });
 });
 
-// YENİ: ORB İÇİN MİKRO HAFIZA (Crash Koruması)
+// ORB MİKRO-SENKRONİZASYON (Saniye Verisi Garantili)
 app.get('/api/orb-sync', (req, res) => {
   const ownerId = req.query.id;
   if (!ownerId) return res.json({});
@@ -144,7 +137,7 @@ app.get('/api/orb-sync', (req, res) => {
     m: settings.mode || "lockdown",
     a: settings.action || "eject",
     e: (settings.enableCountdown === 1 || settings.enableCountdown === true) ? 1 : 0,
-    c: Number(settings.countdown || 10),
+    c: parseInt(settings.countdown) || 10, // Saniyeyi kesinlikle tamsayıya çevirir
     w: cleanWhitelist.join("|")
   });
 });
@@ -165,9 +158,11 @@ app.post('/api/settings', async (req, res) => {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "TRIGGER_SYNC" }), timeout: 3000
       });
-      return res.json({ status: "success", message: "Saved and triggered sync." });
+      // Ping başarılıysa yeşil mesaj
+      return res.json({ status: "success", message: "Saved and triggered sync instantly." });
     } catch (e) {
-      return res.json({ status: "success", message: "Saved locally. Orb will auto-sync." });
+      // Ping başarısız olsa bile KIRMIZI HATA VERMEZ! Yeşil mesaj verir, orb 10 saniye içinde kendi çeker.
+      return res.json({ status: "success", message: "Saved to cloud. Orb will auto-sync." });
     }
   }
   res.json({ status: "success", message: "Saved locally." });
