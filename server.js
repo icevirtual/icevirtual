@@ -31,7 +31,6 @@ app.post('/api/register-orb', (req, res) => {
   db.devices[ownerId].region = region || "Unknown Region";
   db.devices[ownerId].lastSeen = new Date().toISOString();
   saveDB();
-
   res.json({ status: "success" });
 });
 
@@ -43,7 +42,6 @@ app.post('/api/update-live-presence', (req, res) => {
   db.devices[ownerId].onlineAvatars = Array.isArray(onlineAvatars) ? onlineAvatars : [];
   db.devices[ownerId].lastPresenceUpdate = new Date().toISOString();
   saveDB();
-
   res.json({ status: "success" });
 });
 
@@ -88,17 +86,20 @@ app.post('/api/record-event', async (req, res) => {
   res.json({ status: "success" });
 });
 
+// AÇIK BURADAYDI - KÖKTEN DÜZELTİLDİ!
 app.post('/api/manual-action', async (req, res) => {
   const { ownerId, targetName } = req.body;
   const device = db.devices[ownerId];
   if (!device || !device.orbUrl) return res.status(404).json({ error: "Orb offline" });
 
   try {
-    const slRes = await fetch(device.orbUrl, {
+    await fetch(device.orbUrl, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "MANUAL_EJECT", targetName })
+      body: JSON.stringify({ action: "MANUAL_EJECT", targetName }),
+      timeout: 4000
     });
-    res.json(await slRes.json());
+    // LSL'den dönen cevabı json okumaya çalışmadan doğrudan success basıyoruz!
+    res.json({ status: "success" });
   } catch (err) {
     res.status(500).json({ error: "Failed to communicate with in-world orb" });
   }
@@ -122,7 +123,6 @@ app.get('/api/settings', (req, res) => {
   });
 });
 
-// ORB MİKRO-SENKRONİZASYON (Saniye Verisi Garantili)
 app.get('/api/orb-sync', (req, res) => {
   const ownerId = req.query.id;
   if (!ownerId) return res.json({});
@@ -137,7 +137,7 @@ app.get('/api/orb-sync', (req, res) => {
     m: settings.mode || "lockdown",
     a: settings.action || "eject",
     e: (settings.enableCountdown === 1 || settings.enableCountdown === true) ? 1 : 0,
-    c: parseInt(settings.countdown) || 10, // Saniyeyi kesinlikle tamsayıya çevirir
+    c: parseInt(settings.countdown) || 10,
     w: cleanWhitelist.join("|")
   });
 });
@@ -158,10 +158,8 @@ app.post('/api/settings', async (req, res) => {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "TRIGGER_SYNC" }), timeout: 3000
       });
-      // Ping başarılıysa yeşil mesaj
       return res.json({ status: "success", message: "Saved and triggered sync instantly." });
     } catch (e) {
-      // Ping başarısız olsa bile KIRMIZI HATA VERMEZ! Yeşil mesaj verir, orb 10 saniye içinde kendi çeker.
       return res.json({ status: "success", message: "Saved to cloud. Orb will auto-sync." });
     }
   }
