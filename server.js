@@ -1,249 +1,206 @@
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const fetch = (...args) => import('node-fetch').then(({default: f}) => f(...args));
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const DB_FILE = path.join(__dirname, 'devices_db.json');
+const DB_FILE = path.join(__dirname, 'database.json');
 
-function loadDevices() {
+// Persistent storage loader
+let db = { devices: {}, settings: {}, logs: {} };
+if (fs.existsSync(DB_FILE)) {
   try {
-    if (fs.existsSync(DB_FILE)) {
-      const data = fs.readFileSync(DB_FILE, 'utf8');
-      return JSON.parse(data);
-    }
-  } catch (err) {
-    console.error('[DATABASE] Failed to read disk DB:', err.message);
-  }
-  return {};
-}
-
-function saveDevices(data) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf8');
-  } catch (err) {
-    console.error('[DATABASE] Failed to write disk DB:', err.message);
+    db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+  } catch (e) {
+    console.error("DB Load error:", e);
   }
 }
 
-let devices = loadDevices();
-
-function getDevice(ownerId) {
-  if (!ownerId) return null;
-  if (!devices[ownerId]) {
-    devices[ownerId] = {
-      orbUrl: "",
-      parcelName: "Main Parcel",
-      region: "Sandbox",
-      lastSeen: Date.now(),
-      settings: {
-        mode: "lockdown",
-        enableCountdown: 1,
-        countdown: 10,
-        action: "eject",
-        enableGroupPass: 0,
-        enableHeight: 0,
-        minHeight: 1.20,
-        maxHeight: 2.10,
-        discordWebhook: "",
-        whitelist: []
-      },
-      visitorLogs: [],
-      onlineAvatars: []
-    };
-    saveDevices(devices);
+function saveDB() {
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+  } catch (e) {
+    console.error("DB Save error:", e);
   }
-  return devices[ownerId];
 }
 
 // 1. Orb Registration
 app.post('/api/register-orb', (req, res) => {
   const { ownerId, orbUrl, parcelName, region } = req.body;
-  if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
+  if (!ownerId || !orbUrl) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
 
-  const device = getDevice(ownerId);
-  if (orbUrl) device.orbUrl = orbUrl;
-  if (parcelName) device.parcelName = parcelName;
-  if (region) device.region = region;
-  device.lastSeen = Date.now();
+  db.devices[ownerId] = {
+    orbUrl,
+    parcelName: parcelName || "Unknown Parcel",
+    region: region || "Unknown Region",
+    lastSeen: new Date().toISOString()
+  };
+  saveDB();
 
-  saveDevices(devices);
-
-  console.log(`[ORB REGISTERED] Owner: ${ownerId} | URL: ${orbUrl} | Parcel: ${device.parcelName} @ ${device.region}`);
-  return res.json({ status: "success", message: "Orb registered successfully" });
+  console.log(`[ORB REGISTERED] Owner: ${ownerId} | URL: ${orbUrl}`);
+  res.json({ status: "success" });
 });
 
-// 2. Live Presence Sync
+// 2. Live Presence Sync (Radar)
 app.post('/api/update-live-presence', (req, res) => {
   const { ownerId, onlineAvatars } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
 
-  const device = getDevice(ownerId);
-  device.onlineAvatars = onlineAvatars || [];
-  device.lastSeen = Date.now();
-  saveDevices(devices);
+  if (!db.devices[ownerId]) {
+    db.devices[ownerId] = { orbUrl: "", parcelName: "Unknown", region: "Unknown" };
+  }
 
-  console.log(`[RADAR UPDATE] Owner: ${ownerId} | Avatars Online: ${device.onlineAvatars.length}`);
-  return res.json({ status: "success" });
+  db.devices[ownerId].onlineAvatars = Array.isArray(onlineAvatars) ? onlineAvatars : [];
+  db.devices[ownerId].lastPresenceUpdate = new Date().toISOString();
+  saveDB();
+
+  res.json({ status: "success" });
 });
 
-// 3. Event Dispatcher
+// 3. Record Event & Discord Relay
 app.post('/api/record-event', async (req, res) => {
   const { ownerId, eventType, avatarName, reason } = req.body;
-  if (!ownerId || !avatarName) return res.status(400).json({ error: "Missing parameters" });
+  if (!ownerId || !avatarName) return res.status(400).json({ error: "Missing fields" });
 
-  const device = getDevice(ownerId);
-  const now = new Date();
-  const timeStr = now.toISOString().substring(11, 19) + " UTC";
+  if (!db.logs[ownerId]) db.logs[ownerId] = [];
 
-  if (eventType === 'enter' || eventType === 'breach') {
-    const exists = device.visitorLogs.find(v => v.name === avatarName);
-    if (!exists) {
-      device.visitorLogs.unshift({ name: avatarName, time: timeStr });
-      if (device.visitorLogs.length > 50) device.visitorLogs.pop();
-      saveDevices(devices);
-    }
-  }
+  const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const logItem = {
+    name: avatarName,
+    type: eventType || "visit",
+    reason: reason || "",
+    time: timeStr,
+    timestamp: Date.now()
+  };
 
-  if (device.settings.discordWebhook) {
-    let embedTitle = "Avatar Entered";
-    let embedColor = 3066993;
+  db.logs[ownerId].unshift(logItem);
+  if (db.logs[ownerId].length > 100) db.logs[ownerId].pop();
+  saveDB();
 
-    if (eventType === 'leave') {
-      embedTitle = "Avatar Left";
-      embedColor = 10070709;
-    } else if (eventType === 'breach') {
-      embedTitle = "Intruder Ejected";
-      embedColor = 15158332;
-    }
+  // Discord Relay
+  const userSettings = db.settings[ownerId] || {};
+  const webhookUrl = userSettings.discordWebhook;
 
+  if (webhookUrl && webhookUrl.startsWith("https://discord.com/api/webhooks/")) {
     try {
-      await axios.post(device.settings.discordWebhook, {
+      const isBreach = (eventType === "breach");
+      const title = isBreach ? "🚨 Intruder Ejected" : "🟢 Visitor Detected";
+      const color = isBreach ? 0xff3b30 : 0x00e676; // Red or Emerald Green
+      const device = db.devices[ownerId] || { parcelName: "Parcel", region: "Region" };
+
+      const discordPayload = {
         embeds: [{
-          title: embedTitle,
-          description: `**Avatar:** \`${avatarName}\`\n**Details:** ${reason}\n**Parcel:** ${device.parcelName} (${device.region})`,
-          color: embedColor,
-          timestamp: new Date()
+          title: `ICE Security • ${title}`,
+          color: color,
+          fields: [
+            { name: "Avatar", value: avatarName, inline: true },
+            { name: "Event Type", value: isBreach ? "Ejection / Home TP" : "Parcel Entry", inline: true },
+            { name: "Location", value: `${device.parcelName} (${device.region})`, inline: false },
+            { name: "Details", value: reason || (isBreach ? "Unauthorized entry" : "Entered parcel boundaries"), inline: false }
+          ],
+          footer: { text: "ICE Security Autonomous Defense Grid" },
+          timestamp: new Date().toISOString()
         }]
+      };
+
+      await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(discordPayload)
       });
-    } catch (e) {
-      console.error(`[DISCORD FAIL] Owner ${ownerId}: ${e.message}`);
+    } catch (err) {
+      console.error("Discord send failed:", err);
     }
   }
 
-  return res.json({ status: "success" });
+  res.json({ status: "success" });
 });
 
-// 4. Remote Manual Kick
+// 4. Remote Kick Action
 app.post('/api/manual-action', async (req, res) => {
   const { ownerId, targetName } = req.body;
-  if (!ownerId || !targetName) return res.status(400).json({ error: "Missing parameters" });
+  const device = db.devices[ownerId];
 
-  const device = getDevice(ownerId);
-  if (!device.orbUrl) {
-    console.error(`[MANUAL EJECT] Failed: No orb URL registered for owner ${ownerId}`);
-    return res.status(404).json({ error: "Orb offline or unlinked" });
+  if (!device || !device.orbUrl) {
+    return res.status(404).json({ error: "In-world orb not connected" });
   }
 
   try {
-    const payload = {
-      action: "MANUAL_EJECT",
-      targetName: targetName
-    };
-
-    await axios.post(device.orbUrl, payload, {
+    const slRes = await fetch(device.orbUrl, {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      timeout: 5000
+      body: JSON.stringify({ action: "MANUAL_EJECT", targetName })
     });
-
-    console.log(`[MANUAL EJECT] Dispatched eject for ${targetName} to orb (${ownerId})`);
-    return res.json({ status: "success" });
+    const slData = await slRes.json();
+    res.json(slData);
   } catch (err) {
-    console.error(`[MANUAL EJECT FAIL] Target: ${targetName} | Error: ${err.message}`);
-    return res.status(500).json({ error: "Failed to dispatch command to in-world orb", details: err.message });
+    res.status(500).json({ error: "Failed to communicate with in-world orb" });
   }
 });
 
-// 5. Settings & State Getter
+// 5. Get Settings & Dashboard Status
 app.get('/api/settings', (req, res) => {
   const ownerId = req.query.id;
   if (!ownerId) {
-    return res.json({
-      status: "waiting",
-      parcelName: "Click Orb In-World",
-      region: "No Device Linked",
-      totalVisits: 0,
-      visitorLogs: [],
-      onlineAvatars: [],
-      settings: {}
-    });
+    return res.json({ status: "alive", message: "ICE Backend Active" });
   }
 
-  const device = getDevice(ownerId);
-  return res.json({
+  const device = db.devices[ownerId] || {};
+  const settings = db.settings[ownerId] || {};
+  const logs = db.logs[ownerId] || [];
+
+  res.json({
     status: "success",
-    parcelName: device.parcelName,
-    region: device.region,
-    orbConnected: Boolean(device.orbUrl),
-    totalVisits: device.visitorLogs.length,
-    visitorLogs: device.visitorLogs,
+    orbConnected: !!device.orbUrl,
+    parcelName: device.parcelName || "Standby / Unregistered",
+    region: device.region || "Standby",
     onlineAvatars: device.onlineAvatars || [],
-    settings: device.settings
+    totalVisits: logs.length,
+    visitorLogs: logs.slice(0, 30),
+    config: settings
   });
 });
 
-// 6. Settings Setter & In-World Sync
+// 6. Save Settings (Pushes to in-world orb)
 app.post('/api/settings', async (req, res) => {
-  const ownerId = req.query.id || req.body.ownerId;
-  if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
+  const { ownerId } = req.query;
+  const settings = req.body;
+  const targetId = ownerId || settings.ownerId;
 
-  const device = getDevice(ownerId);
-  device.settings = { ...device.settings, ...req.body };
-  saveDevices(devices);
+  if (!targetId) return res.status(400).json({ error: "Missing owner ID" });
 
-  if (!device.orbUrl) {
-    console.warn(`[SYNC WARN] Cannot dispatch settings: No active orbUrl for owner ${ownerId}.`);
-    return res.status(404).json({
-      status: "warning",
-      error: "In-world orb not connected. Touch the orb in Second Life to re-register.",
-      settings: device.settings
-    });
+  db.settings[targetId] = settings;
+  saveDB();
+
+  const device = db.devices[targetId];
+  if (device && device.orbUrl) {
+    try {
+      const whitelistStr = Array.isArray(settings.whitelist) ? settings.whitelist.join(",") : "";
+      const slRes = await fetch(device.orbUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "SYNC_SETTINGS",
+          active: (settings.mode === "lockdown").toString(),
+          mode: settings.mode,
+          actionType: settings.action,
+          whitelist: whitelistStr
+        })
+      });
+      const slData = await slRes.json();
+      return res.json({ status: "success", orbResponse: slData });
+    } catch (e) {
+      return res.json({ status: "warning", error: "Saved locally, orb unreachable" });
+    }
   }
 
-  try {
-    const rawWhitelist = device.settings.whitelist;
-    const whitelistCsv = Array.isArray(rawWhitelist) ? rawWhitelist.join(",") : (rawWhitelist || "");
-
-    const payload = {
-      action: "SYNC_SETTINGS",
-      command: "CONFIG_UPDATE",
-      whitelist: whitelistCsv,
-      active: device.settings.mode === "lockdown" ? "true" : "false",
-      countdown: String(device.settings.countdown || 10),
-      actionType: device.settings.action || "eject"
-    };
-
-    console.log(`[DISPATCHING TO SL] Target: ${device.orbUrl} | Payload:`, JSON.stringify(payload));
-
-    const response = await axios.post(device.orbUrl, payload, {
-      headers: { "Content-Type": "application/json" },
-      timeout: 5000
-    });
-
-    console.log(`[SYNC SUCCESS] Delivered to orb (${ownerId}). Response:`, response.data);
-    return res.json({ status: "success", settings: device.settings });
-  } catch (err) {
-    console.error(`[SYNC FAIL] Could not reach orb at ${device.orbUrl}: ${err.message}`);
-    return res.status(502).json({
-      error: "Failed to communicate with in-world orb",
-      details: err.message,
-      settings: device.settings
-    });
-  }
+  res.json({ status: "warning", error: "Saved locally, orb not registered yet" });
 });
 
 // 7. Discord Webhook Test
@@ -251,21 +208,35 @@ app.post('/api/test-discord', async (req, res) => {
   const { webhookUrl, ownerId } = req.body;
   if (!webhookUrl) return res.status(400).json({ error: "Missing webhook URL" });
 
-  const device = getDevice(ownerId);
   try {
-    await axios.post(webhookUrl, {
+    const payload = {
       embeds: [{
-        title: "ICE Security Operational",
-        description: `Connected to **${device.parcelName}** (${device.region}). Real-time event notifications active.`,
-        color: 3447003,
-        timestamp: new Date()
+        title: "🛡️ ICE Security • System Connected",
+        description: "Your Discord webhook has been successfully linked to your ICE Security Studio.",
+        color: 0x00bcd4,
+        fields: [
+          { name: "Owner UUID", value: ownerId || "Direct Test", inline: true },
+          { name: "Status", value: "Verified & Ready", inline: true }
+        ],
+        footer: { text: "ICE Security Engine" },
+        timestamp: new Date().toISOString()
       }]
+    };
+
+    const dRes = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
     });
-    return res.json({ status: "success" });
-  } catch (err) {
-    return res.status(500).json({ error: "Discord ping failed", details: err.message });
+
+    if (dRes.ok) return res.json({ status: "success" });
+    return res.status(400).json({ error: "Discord rejected request" });
+  } catch (e) {
+    res.status(500).json({ error: "Network error connecting to Discord" });
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`[ICE Security] Multi-Tenant Engine running on port ${PORT}`));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`ICE Security Backend running on port ${PORT}`);
+});
