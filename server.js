@@ -78,7 +78,7 @@ app.post('/api/register-orb', (req, res) => {
   res.json({ status: "success" });
 });
 
-// 5. Radar & Canlı Konum Güncelleme (Koordinat Destekli)
+// 5. Radar & Canlı Konum Güncelleme
 app.post('/api/update-live-presence', (req, res) => {
   const { ownerId, onlineAvatars, orbUrl } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
@@ -113,21 +113,17 @@ app.post('/api/record-event', async (req, res) => {
     try {
       const isBreach = (eventType === "breach");
       const isVip = (eventType === "vip_visit");
-      const isBan = (eventType === "blacklist_eject");
       const device = db.devices[ownerId] || { parcelName: "Parcel", region: "Region" };
 
       let title = "🟢 Visitor Detected";
-      let color = 0x00e676;
+      let color = 0x00e676; // Yeşil
 
       if (isBreach) {
         title = "🚨 Intruder Ejected";
-        color = 0xff3b30;
-      } else if (isBan) {
-        title = "⛔ Blacklisted Target Neutralized";
-        color = 0x7209b7;
+        color = 0xff3b30; // Kırmızı
       } else if (isVip) {
         title = "✨ VIP Whitelisted Guest Arrived";
-        color = 0x00e5ff;
+        color = 0x00e5ff; // Mavi
       }
 
       await fetch(webhookUrl.trim(), {
@@ -135,7 +131,7 @@ app.post('/api/record-event', async (req, res) => {
         headers: { 
           "Content-Type": "application/json",
           "Accept": "application/json",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          "User-Agent": "Mozilla/5.0"
         },
         body: JSON.stringify({
           embeds: [{
@@ -144,9 +140,9 @@ app.post('/api/record-event', async (req, res) => {
             fields: [
               { name: "Avatar", value: avatarName, inline: true },
               { name: "Location", value: `${device.parcelName} (${device.region})`, inline: true },
-              { name: "Reason", value: reason || "Auto Defense Execution", inline: false }
+              { name: "Status / Details", value: reason || (isBreach ? "Unauthorized" : "Welcome"), inline: false }
             ],
-            footer: { text: "ICE Security Autonomous Grid" },
+            footer: { text: "ICE Security Autonomous Defense Grid" },
             timestamp: new Date().toISOString()
           }]
         })
@@ -213,7 +209,7 @@ app.get('/api/settings', (req, res) => {
   });
 });
 
-// 9. Orb Mikro-Senkronizasyon (Genişletilmiş Konfigürasyon)
+// 9. Orb Mikro-Senkronizasyon
 app.get('/api/orb-sync', (req, res) => {
   const ownerId = req.query.id;
   const orbUrl = req.query.url;
@@ -224,7 +220,6 @@ app.get('/api/orb-sync', (req, res) => {
   if (orbUrl && orbUrl.startsWith("http")) device.orbUrl = orbUrl;
 
   const settings = db.settings[ownerId] || {};
-  
   const cleanList = (arr) => Array.isArray(arr) ? arr.map(s => String(s).trim().toLowerCase()).filter(s => s.length > 0) : [];
 
   let kickTarget = "";
@@ -241,7 +236,7 @@ app.get('/api/orb-sync', (req, res) => {
     w: cleanList(settings.whitelist).join("|"),
     b: cleanList(settings.blacklist).join("|"),
     age: parseInt(settings.minAge) || 0,
-    alt: settings.altitudeMode || "all", // "all", "ground", "skybox"
+    alt: settings.altitudeMode || "all",
     minZ: parseInt(settings.minZ) || 0,
     maxZ: parseInt(settings.maxZ) || 4000,
     fx: (settings.enableFx === 0 ? 0 : 1),
@@ -294,7 +289,7 @@ app.post('/api/test-discord', async (req, res) => {
       headers: { 
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0"
       },
       body: JSON.stringify({ 
         embeds: [{ 
