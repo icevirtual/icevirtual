@@ -23,7 +23,7 @@ function saveDB() {
   catch (e) { console.error("DB Save error:", e); }
 }
 
-// 1. PIN Tanımlama / Değiştirme
+// 1. PIN Tanımlama / Güncelleme
 app.post('/api/set-pin', (req, res) => {
   const { ownerId, pin } = req.body;
   if (!ownerId || !pin) {
@@ -42,7 +42,21 @@ app.post('/api/set-pin', (req, res) => {
   res.json({ status: "success", message: "PIN updated successfully." });
 });
 
-// 2. PIN Doğrulama
+// 2. In-World Donanımsal PIN Sıfırlama (Orb Menüsünden)
+app.post('/api/reset-pin', (req, res) => {
+  const { ownerId } = req.body;
+  if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
+
+  if (db.auth && db.auth[ownerId]) {
+    delete db.auth[ownerId];
+    saveDB();
+    console.log(`[AUTH] PIN successfully wiped by Orb hardware reset for: ${ownerId}`);
+  }
+  
+  res.json({ status: "success", message: "PIN reset successfully." });
+});
+
+// 3. PIN Doğrulama
 app.post('/api/verify-pin', (req, res) => {
   const { ownerId, pin } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing Owner ID." });
@@ -59,7 +73,7 @@ app.post('/api/verify-pin', (req, res) => {
   return res.status(401).json({ status: "invalid_pin", error: "Incorrect Security PIN." });
 });
 
-// 3. Orb Kaydı
+// 4. Orb Kaydı
 app.post('/api/register-orb', (req, res) => {
   const { ownerId, orbUrl, parcelName, region } = req.body;
   if (!ownerId || !orbUrl) return res.status(400).json({ error: "Missing fields" });
@@ -73,7 +87,7 @@ app.post('/api/register-orb', (req, res) => {
   res.json({ status: "success" });
 });
 
-// 4. Radar & Canlı Konum
+// 5. Radar & Canlı Konum Güncelleme
 app.post('/api/update-live-presence', (req, res) => {
   const { ownerId, onlineAvatars, orbUrl } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
@@ -87,7 +101,7 @@ app.post('/api/update-live-presence', (req, res) => {
   res.json({ status: "success" });
 });
 
-// 5. Olay Kayıt & Discord Relay
+// 6. Olay Kaydı & Discord Webhook
 app.post('/api/record-event', async (req, res) => {
   const { ownerId, eventType, avatarName, reason } = req.body;
   if (!ownerId || !avatarName) return res.status(400).json({ error: "Missing fields" });
@@ -136,7 +150,7 @@ app.post('/api/record-event', async (req, res) => {
   res.json({ status: "success" });
 });
 
-// 6. Manuel Eject Kuyruğu
+// 7. Manuel Eject Kuyruğu
 app.post('/api/manual-action', async (req, res) => {
   const { ownerId, targetName } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ID" });
@@ -161,7 +175,7 @@ app.post('/api/manual-action', async (req, res) => {
   }
 });
 
-// 7. Panel Veri Alma (PIN Korumalı)
+// 8. Panel Veri Alma (PIN Korumalı)
 app.get('/api/settings', (req, res) => {
   const ownerId = req.query.id;
   const clientPin = req.query.pin;
@@ -191,7 +205,7 @@ app.get('/api/settings', (req, res) => {
   });
 });
 
-// 8. Orb Mikro-Senkronizasyon
+// 9. Orb Mikro-Senkronizasyon
 app.get('/api/orb-sync', (req, res) => {
   const ownerId = req.query.id;
   const orbUrl = req.query.url;
@@ -225,7 +239,7 @@ app.get('/api/orb-sync', (req, res) => {
   });
 });
 
-// 9. Panelden Ayar Kaydetme (PIN Korumalı)
+// 10. Panel Ayarlarını Kaydetme (PIN Korumalı)
 app.post('/api/settings', async (req, res) => {
   const { ownerId } = req.query;
   const clientPin = req.query.pin;
@@ -256,7 +270,7 @@ app.post('/api/settings', async (req, res) => {
   res.json({ status: "success", message: "Saved locally." });
 });
 
-// 10. Discord Test
+// 11. Discord Webhook Testi
 app.post('/api/test-discord', async (req, res) => {
   const { webhookUrl } = req.body;
   if (!webhookUrl || !webhookUrl.includes("webhooks")) {
@@ -274,7 +288,7 @@ app.post('/api/test-discord', async (req, res) => {
           content: null,
           embeds: [{ 
               title: "🛡️ ICE Security Test", 
-              description: "Your Discord webhook is working perfectly!",
+              description: "Your Discord webhook integration is functioning perfectly.",
               color: 0x00bcd4 
           }] 
       })
