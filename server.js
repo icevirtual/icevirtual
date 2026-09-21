@@ -10,17 +10,56 @@ app.use(express.json());
 
 const DB_FILE = path.join(__dirname, 'database.json');
 
-let db = { devices: {}, settings: {}, logs: {} };
+let db = { devices: {}, settings: {}, logs: {}, auth: {} };
 if (fs.existsSync(DB_FILE)) {
   try { db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } 
   catch (e) { console.error("DB Load error:", e); }
 }
+
+if (!db.auth) db.auth = {};
 
 function saveDB() {
   try { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); } 
   catch (e) { console.error("DB Save error:", e); }
 }
 
+// 1. PIN Tanımlama / Değiştirme
+app.post('/api/set-pin', (req, res) => {
+  const { ownerId, pin } = req.body;
+  if (!ownerId || !pin) {
+    return res.status(400).json({ error: "Owner ID and PIN are required." });
+  }
+
+  const cleanPin = String(pin).trim();
+  if (cleanPin.length < 4 || cleanPin.length > 8) {
+    return res.status(400).json({ error: "PIN must be between 4 and 8 characters." });
+  }
+
+  db.auth[ownerId] = cleanPin;
+  saveDB();
+
+  console.log(`[AUTH] PIN set for owner: ${ownerId}`);
+  res.json({ status: "success", message: "PIN updated successfully." });
+});
+
+// 2. PIN Doğrulama
+app.post('/api/verify-pin', (req, res) => {
+  const { ownerId, pin } = req.body;
+  if (!ownerId) return res.status(400).json({ error: "Missing Owner ID." });
+
+  const existingPin = db.auth[ownerId];
+  if (!existingPin) {
+    return res.json({ status: "no_pin_set", message: "No PIN configured yet." });
+  }
+
+  if (String(pin).trim() === existingPin) {
+    return res.json({ status: "success", verified: true });
+  }
+
+  return res.status(401).json({ status: "invalid_pin", error: "Incorrect Security PIN." });
+});
+
+// 3. Orb Kaydı
 app.post('/api/register-orb', (req, res) => {
   const { ownerId, orbUrl, parcelName, region } = req.body;
   if (!ownerId || !orbUrl) return res.status(400).json({ error: "Missing fields" });
@@ -34,6 +73,7 @@ app.post('/api/register-orb', (req, res) => {
   res.json({ status: "success" });
 });
 
+// 4. Radar & Canlı Konum
 app.post('/api/update-live-presence', (req, res) => {
   const { ownerId, onlineAvatars, orbUrl } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
@@ -47,6 +87,7 @@ app.post('/api/update-live-presence', (req, res) => {
   res.json({ status: "success" });
 });
 
+// 5. Olay Kayıt & Discord Relay
 app.post('/api/record-event', async (req, res) => {
   const { ownerId, eventType, avatarName, reason } = req.body;
   if (!ownerId || !avatarName) return res.status(400).json({ error: "Missing fields" });
@@ -63,7 +104,6 @@ app.post('/api/record-event', async (req, res) => {
   const userSettings = db.settings[ownerId] || {};
   const webhookUrl = userSettings.discordWebhook;
 
-  // ÇÖZÜM BURADA: Boşlukları kırpar, katı URL kuralını esnetir ve Discord bot kimliğini ekler
   if (webhookUrl && webhookUrl.includes("webhooks")) {
     try {
       const isBreach = (eventType === "breach");
@@ -90,12 +130,13 @@ app.post('/api/record-event', async (req, res) => {
         })
       });
     } catch (err) {
-        console.error("Discord send failed:", err);
+      console.error("Discord send failed:", err);
     }
   }
   res.json({ status: "success" });
 });
 
+// 6. Manuel Eject Kuyruğu
 app.post('/api/manual-action', async (req, res) => {
   const { ownerId, targetName } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ID" });
@@ -120,14 +161,26 @@ app.post('/api/manual-action', async (req, res) => {
   }
 });
 
+// 7. Panel Veri Alma (PIN Korumalı)
 app.get('/api/settings', (req, res) => {
   const ownerId = req.query.id;
+  const clientPin = req.query.pin;
   if (!ownerId) return res.json({ status: "alive" });
+
+  const existingPin = db.auth[ownerId];
+  if (existingPin && String(clientPin).trim() !== existingPin) {
+    return res.status(401).json({
+      status: "auth_required",
+      hasPinSet: true,
+      error: "Authentication required. Please enter Security PIN."
+    });
+  }
 
   const device = db.devices[ownerId] || {};
   const logs = db.logs[ownerId] || [];
   res.json({
     status: "success",
+    hasPinSet: !!existingPin,
     orbConnected: !!device.orbUrl,
     parcelName: device.parcelName || "Standby",
     region: device.region || "Standby",
@@ -138,6 +191,7 @@ app.get('/api/settings', (req, res) => {
   });
 });
 
+// 8. Orb Mikro-Senkronizasyon
 app.get('/api/orb-sync', (req, res) => {
   const ownerId = req.query.id;
   const orbUrl = req.query.url;
@@ -171,11 +225,18 @@ app.get('/api/orb-sync', (req, res) => {
   });
 });
 
+// 9. Panelden Ayar Kaydetme (PIN Korumalı)
 app.post('/api/settings', async (req, res) => {
   const { ownerId } = req.query;
+  const clientPin = req.query.pin;
   const settings = req.body;
   const targetId = ownerId || settings.ownerId;
   if (!targetId) return res.status(400).json({ error: "Missing ID" });
+
+  const existingPin = db.auth[targetId];
+  if (existingPin && String(clientPin).trim() !== existingPin) {
+    return res.status(401).json({ status: "auth_required", error: "Invalid PIN. Access denied." });
+  }
 
   db.settings[targetId] = settings;
   saveDB();
@@ -195,8 +256,9 @@ app.post('/api/settings', async (req, res) => {
   res.json({ status: "success", message: "Saved locally." });
 });
 
+// 10. Discord Test
 app.post('/api/test-discord', async (req, res) => {
-  const { webhookUrl, ownerId } = req.body;
+  const { webhookUrl } = req.body;
   if (!webhookUrl || !webhookUrl.includes("webhooks")) {
       return res.status(400).json({ error: "Invalid Discord Webhook URL" });
   }
