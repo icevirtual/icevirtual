@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-const fetch = (...args) => import('node-fetch').then(({default: f}) => f(...args));
 
 const app = express();
 app.use(cors());
@@ -42,7 +41,7 @@ app.post('/api/set-pin', (req, res) => {
   res.json({ status: "success", message: "PIN updated successfully." });
 });
 
-// 2. In-World Donanımsal PIN Sıfırlama (Orb Menüsünden)
+// 2. In-World Donanımsal PIN Sıfırlama
 app.post('/api/reset-pin', (req, res) => {
   const { ownerId } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
@@ -118,25 +117,38 @@ app.post('/api/record-event', async (req, res) => {
   const userSettings = db.settings[ownerId] || {};
   const webhookUrl = userSettings.discordWebhook;
 
-  if (webhookUrl && webhookUrl.includes("webhooks")) {
+  if (webhookUrl && webhookUrl.includes("discord.com/api/webhooks")) {
     try {
       const isBreach = (eventType === "breach");
+      const isVip = (eventType === "vip_visit");
       const device = db.devices[ownerId] || { parcelName: "Parcel", region: "Region" };
+
+      let title = "🟢 Visitor Detected";
+      let color = 0x00e676; // Yeşil
+
+      if (isBreach) {
+        title = "🚨 Intruder Ejected";
+        color = 0xff3b30; // Kırmızı
+      } else if (isVip) {
+        title = "✨ VIP Whitelisted Guest Arrived";
+        color = 0x00e5ff; // Neon Mavi
+      }
+
       await fetch(webhookUrl.trim(), {
         method: "POST", 
         headers: { 
-            "Content-Type": "application/json",
-            "User-Agent": "ICE-Security-Bot/1.0"
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         },
         body: JSON.stringify({
-          content: null,
           embeds: [{
-            title: isBreach ? "🚨 Intruder Ejected" : "🟢 Visitor Detected",
-            color: isBreach ? 0xff3b30 : 0x00e676,
+            title: title,
+            color: color,
             fields: [
               { name: "Avatar", value: avatarName, inline: true },
               { name: "Location", value: `${device.parcelName} (${device.region})`, inline: true },
-              { name: "Details", value: reason || (isBreach ? "Unauthorized" : "Entered boundaries"), inline: false }
+              { name: "Status / Details", value: reason || (isBreach ? "Unauthorized" : "Welcome"), inline: false }
             ],
             footer: { text: "ICE Security Autonomous Defense Grid" },
             timestamp: new Date().toISOString()
@@ -169,7 +181,7 @@ app.post('/api/manual-action', async (req, res) => {
       await fetch(device.orbUrl, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "MANUAL_EJECT", targetName }),
-        timeout: 2000
+        signal: AbortSignal.timeout(2000)
       });
     } catch (err) {}
   }
@@ -260,7 +272,8 @@ app.post('/api/settings', async (req, res) => {
     try {
       await fetch(device.orbUrl, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "TRIGGER_SYNC" }), timeout: 2000
+        body: JSON.stringify({ action: "TRIGGER_SYNC" }), 
+        signal: AbortSignal.timeout(2000)
       });
       return res.json({ status: "success", message: "Saved and triggered sync instantly." });
     } catch (e) {
@@ -270,35 +283,45 @@ app.post('/api/settings', async (req, res) => {
   res.json({ status: "success", message: "Saved locally." });
 });
 
-// 11. Discord Webhook Testi
+// 11. Discord Webhook Testi (Hatasız & Güvenli İletim)
 app.post('/api/test-discord', async (req, res) => {
   const { webhookUrl } = req.body;
-  if (!webhookUrl || !webhookUrl.includes("webhooks")) {
-      return res.status(400).json({ error: "Invalid Discord Webhook URL" });
+  if (!webhookUrl || !webhookUrl.includes("discord.com/api/webhooks")) {
+      return res.status(400).json({ error: "Invalid Discord Webhook URL. It must start with https://discord.com/api/webhooks/..." });
   }
   
   try {
     const dRes = await fetch(webhookUrl.trim(), {
       method: "POST", 
       headers: { 
-          "Content-Type": "application/json",
-          "User-Agent": "ICE-Security-Bot/1.0"
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
       },
       body: JSON.stringify({ 
-          content: null,
-          embeds: [{ 
-              title: "🛡️ ICE Security Test", 
-              description: "Your Discord webhook integration is functioning perfectly.",
-              color: 0x00bcd4 
-          }] 
+        embeds: [{ 
+          title: "🛡️ ICE Security Test Dispatch", 
+          description: "Your Discord webhook integration is functioning perfectly!",
+          color: 0x00e5ff,
+          fields: [
+            { name: "Status", value: "Verified & Connected", inline: true },
+            { name: "System", value: "ICE Security Core v1.0", inline: true }
+          ],
+          footer: { text: "Autonomous Parcel Defense Grid" },
+          timestamp: new Date().toISOString()
+        }] 
       })
     });
     
-    if (dRes.ok) return res.json({ status: "success" });
+    if (dRes.ok || dRes.status === 204) {
+      return res.json({ status: "success" });
+    }
+
     const errorText = await dRes.text();
-    return res.status(400).json({ error: "Discord rejected request: " + errorText });
+    return res.status(400).json({ error: `Discord HTTP ${dRes.status}: ${errorText}` });
   } catch (e) {
-    res.status(500).json({ error: "Network error to Discord" });
+    console.error("Test Discord error:", e);
+    res.status(500).json({ error: "Backend network failed to reach Discord: " + e.message });
   }
 });
 
