@@ -16,6 +16,9 @@ if (fs.existsSync(DB_FILE)) {
 }
 
 if (!db.auth) db.auth = {};
+if (!db.settings) db.settings = {};
+if (!db.devices) db.devices = {};
+if (!db.logs) db.logs = {};
 
 function saveDB() {
   try { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); } 
@@ -27,12 +30,13 @@ app.post('/api/set-pin', (req, res) => {
   const { ownerId, pin } = req.body;
   if (!ownerId || !pin) return res.status(400).json({ error: "Owner ID and PIN required." });
 
+  const cleanId = String(ownerId).toLowerCase().trim();
   const cleanPin = String(pin).trim();
   if (cleanPin.length < 4 || cleanPin.length > 8) {
     return res.status(400).json({ error: "PIN must be 4-8 chars." });
   }
 
-  db.auth[ownerId] = cleanPin;
+  db.auth[cleanId] = cleanPin;
   saveDB();
   res.json({ status: "success", message: "PIN updated." });
 });
@@ -42,10 +46,11 @@ app.post('/api/reset-pin', (req, res) => {
   const { ownerId } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
 
-  if (db.auth && db.auth[ownerId]) {
-    delete db.auth[ownerId];
+  const cleanId = String(ownerId).toLowerCase().trim();
+  if (db.auth && db.auth[cleanId]) {
+    delete db.auth[cleanId];
     saveDB();
-    console.log(`[AUTH] PIN wiped by Orb hardware reset for: ${ownerId}`);
+    console.log(`[AUTH] PIN wiped by Orb hardware reset for: ${cleanId}`);
   }
   res.json({ status: "success", message: "PIN reset." });
 });
@@ -55,7 +60,8 @@ app.post('/api/verify-pin', (req, res) => {
   const { ownerId, pin } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing Owner ID." });
 
-  const existingPin = db.auth[ownerId];
+  const cleanId = String(ownerId).toLowerCase().trim();
+  const existingPin = db.auth[cleanId];
   if (!existingPin) return res.json({ status: "no_pin_set" });
 
   if (String(pin).trim() === existingPin) {
@@ -69,11 +75,12 @@ app.post('/api/register-orb', (req, res) => {
   const { ownerId, orbUrl, parcelName, region } = req.body;
   if (!ownerId || !orbUrl) return res.status(400).json({ error: "Missing fields" });
 
-  if (!db.devices[ownerId]) db.devices[ownerId] = {};
-  db.devices[ownerId].orbUrl = orbUrl;
-  db.devices[ownerId].parcelName = parcelName || "Unknown Parcel";
-  db.devices[ownerId].region = region || "Unknown Region";
-  db.devices[ownerId].lastSeen = new Date().toISOString();
+  const cleanId = String(ownerId).toLowerCase().trim();
+  if (!db.devices[cleanId]) db.devices[cleanId] = {};
+  db.devices[cleanId].orbUrl = orbUrl;
+  db.devices[cleanId].parcelName = parcelName || "Unknown Parcel";
+  db.devices[cleanId].region = region || "Unknown Region";
+  db.devices[cleanId].lastSeen = new Date().toISOString();
   saveDB();
   res.json({ status: "success" });
 });
@@ -83,37 +90,42 @@ app.post('/api/update-live-presence', (req, res) => {
   const { ownerId, onlineAvatars, orbUrl } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
 
-  if (!db.devices[ownerId]) db.devices[ownerId] = { parcelName: "Unknown", region: "Unknown" };
-  if (orbUrl && orbUrl.startsWith("http")) db.devices[ownerId].orbUrl = orbUrl;
+  const cleanId = String(ownerId).toLowerCase().trim();
+  if (!db.devices[cleanId]) db.devices[cleanId] = { parcelName: "Unknown", region: "Unknown" };
+  if (orbUrl && orbUrl.startsWith("http")) db.devices[cleanId].orbUrl = orbUrl;
   
-  db.devices[ownerId].onlineAvatars = Array.isArray(onlineAvatars) ? onlineAvatars : [];
-  db.devices[ownerId].lastPresenceUpdate = new Date().toISOString();
+  db.devices[cleanId].onlineAvatars = Array.isArray(onlineAvatars) ? onlineAvatars : [];
+  db.devices[cleanId].lastPresenceUpdate = new Date().toISOString();
   saveDB();
   res.json({ status: "success" });
 });
 
-// 6. Olay Kaydı & Discord Webhook
+// 6. Olay Kaydı & Discord Webhook (Kusursuz İletim)
 app.post('/api/record-event', async (req, res) => {
   const { ownerId, eventType, avatarName, reason } = req.body;
   if (!ownerId || !avatarName) return res.status(400).json({ error: "Missing fields" });
 
-  if (!db.logs[ownerId]) db.logs[ownerId] = [];
+  const cleanId = String(ownerId).toLowerCase().trim();
+  if (!db.logs[cleanId]) db.logs[cleanId] = [];
   const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   
-  db.logs[ownerId].unshift({
+  db.logs[cleanId].unshift({
     name: avatarName, type: eventType || "visit", reason: reason || "", time: timeStr, timestamp: Date.now()
   });
-  if (db.logs[ownerId].length > 100) db.logs[ownerId].pop();
+  if (db.logs[cleanId].length > 100) db.logs[cleanId].pop();
   saveDB();
 
-  const userSettings = db.settings[ownerId] || {};
-  const webhookUrl = userSettings.discordWebhook;
+  // Webhook URL'yi tüm ayarlardan güvenli çek
+  const userSettings = db.settings[cleanId] || {};
+  let webhookUrl = userSettings.discordWebhook;
+
+  console.log(`[EVENT] Received ${eventType} for ${avatarName} (Owner: ${cleanId}). Webhook: ${webhookUrl ? "CONFIGURED" : "NOT SET"}`);
 
   if (webhookUrl && webhookUrl.includes("discord.com/api/webhooks")) {
     try {
       const isBreach = (eventType === "breach");
       const isVip = (eventType === "vip_visit");
-      const device = db.devices[ownerId] || { parcelName: "Parcel", region: "Region" };
+      const device = db.devices[cleanId] || { parcelName: "Parcel", region: "Region" };
 
       let title = "🟢 Visitor Detected";
       let color = 0x00e676; // Yeşil
@@ -126,7 +138,7 @@ app.post('/api/record-event', async (req, res) => {
         color = 0x00e5ff; // Mavi
       }
 
-      await fetch(webhookUrl.trim(), {
+      const dRes = await fetch(webhookUrl.trim(), {
         method: "POST", 
         headers: { 
           "Content-Type": "application/json",
@@ -147,10 +159,13 @@ app.post('/api/record-event', async (req, res) => {
           }]
         })
       });
+
+      console.log(`[DISCORD] Dispatch status: ${dRes.status}`);
     } catch (err) {
-      console.error("Discord send failed:", err);
+      console.error("[DISCORD] Send failed:", err);
     }
   }
+
   res.json({ status: "success" });
 });
 
@@ -159,8 +174,9 @@ app.post('/api/manual-action', async (req, res) => {
   const { ownerId, targetName } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ID" });
 
-  if (!db.devices[ownerId]) db.devices[ownerId] = {};
-  const device = db.devices[ownerId];
+  const cleanId = String(ownerId).toLowerCase().trim();
+  if (!db.devices[cleanId]) db.devices[cleanId] = {};
+  const device = db.devices[cleanId];
 
   device.kickQueue = device.kickQueue || [];
   device.kickQueue.push(targetName);
@@ -185,7 +201,8 @@ app.get('/api/settings', (req, res) => {
   const clientPin = req.query.pin;
   if (!ownerId) return res.json({ status: "alive" });
 
-  const existingPin = db.auth[ownerId];
+  const cleanId = String(ownerId).toLowerCase().trim();
+  const existingPin = db.auth[cleanId];
   if (existingPin && String(clientPin).trim() !== existingPin) {
     return res.status(401).json({
       status: "auth_required",
@@ -194,8 +211,8 @@ app.get('/api/settings', (req, res) => {
     });
   }
 
-  const device = db.devices[ownerId] || {};
-  const logs = db.logs[ownerId] || [];
+  const device = db.devices[cleanId] || {};
+  const logs = db.logs[cleanId] || [];
   res.json({
     status: "success",
     hasPinSet: !!existingPin,
@@ -205,7 +222,7 @@ app.get('/api/settings', (req, res) => {
     onlineAvatars: device.onlineAvatars || [],
     totalVisits: logs.length,
     visitorLogs: logs.slice(0, 30),
-    config: db.settings[ownerId] || {}
+    config: db.settings[cleanId] || {}
   });
 });
 
@@ -215,11 +232,12 @@ app.get('/api/orb-sync', (req, res) => {
   const orbUrl = req.query.url;
   if (!ownerId) return res.json({});
   
-  if (!db.devices[ownerId]) db.devices[ownerId] = {};
-  const device = db.devices[ownerId];
+  const cleanId = String(ownerId).toLowerCase().trim();
+  if (!db.devices[cleanId]) db.devices[cleanId] = {};
+  const device = db.devices[cleanId];
   if (orbUrl && orbUrl.startsWith("http")) device.orbUrl = orbUrl;
 
-  const settings = db.settings[ownerId] || {};
+  const settings = db.settings[cleanId] || {};
   const cleanList = (arr) => Array.isArray(arr) ? arr.map(s => String(s).trim().toLowerCase()).filter(s => s.length > 0) : [];
 
   let kickTarget = "";
@@ -252,15 +270,17 @@ app.post('/api/settings', async (req, res) => {
   const targetId = ownerId || settings.ownerId;
   if (!targetId) return res.status(400).json({ error: "Missing ID" });
 
-  const existingPin = db.auth[targetId];
+  const cleanId = String(targetId).toLowerCase().trim();
+  const existingPin = db.auth[cleanId];
   if (existingPin && String(clientPin).trim() !== existingPin) {
     return res.status(401).json({ status: "auth_required", error: "Invalid PIN." });
   }
 
-  db.settings[targetId] = settings;
+  db.settings[cleanId] = settings;
   saveDB();
+  console.log(`[SETTINGS] Updated for ${cleanId}. Webhook: ${settings.discordWebhook ? "YES" : "NO"}`);
 
-  const device = db.devices[targetId];
+  const device = db.devices[cleanId];
   if (device && device.orbUrl) {
     try {
       await fetch(device.orbUrl, {
