@@ -25,20 +25,16 @@ function saveDB() {
 // 1. PIN Tanımlama / Güncelleme
 app.post('/api/set-pin', (req, res) => {
   const { ownerId, pin } = req.body;
-  if (!ownerId || !pin) {
-    return res.status(400).json({ error: "Owner ID and PIN are required." });
-  }
+  if (!ownerId || !pin) return res.status(400).json({ error: "Owner ID and PIN required." });
 
   const cleanPin = String(pin).trim();
   if (cleanPin.length < 4 || cleanPin.length > 8) {
-    return res.status(400).json({ error: "PIN must be between 4 and 8 characters." });
+    return res.status(400).json({ error: "PIN must be 4-8 chars." });
   }
 
   db.auth[ownerId] = cleanPin;
   saveDB();
-
-  console.log(`[AUTH] PIN set for owner: ${ownerId}`);
-  res.json({ status: "success", message: "PIN updated successfully." });
+  res.json({ status: "success", message: "PIN updated." });
 });
 
 // 2. In-World Donanımsal PIN Sıfırlama
@@ -49,10 +45,9 @@ app.post('/api/reset-pin', (req, res) => {
   if (db.auth && db.auth[ownerId]) {
     delete db.auth[ownerId];
     saveDB();
-    console.log(`[AUTH] PIN successfully wiped by Orb hardware reset for: ${ownerId}`);
+    console.log(`[AUTH] PIN wiped by Orb hardware reset for: ${ownerId}`);
   }
-  
-  res.json({ status: "success", message: "PIN reset successfully." });
+  res.json({ status: "success", message: "PIN reset." });
 });
 
 // 3. PIN Doğrulama
@@ -61,14 +56,11 @@ app.post('/api/verify-pin', (req, res) => {
   if (!ownerId) return res.status(400).json({ error: "Missing Owner ID." });
 
   const existingPin = db.auth[ownerId];
-  if (!existingPin) {
-    return res.json({ status: "no_pin_set", message: "No PIN configured yet." });
-  }
+  if (!existingPin) return res.json({ status: "no_pin_set" });
 
   if (String(pin).trim() === existingPin) {
     return res.json({ status: "success", verified: true });
   }
-
   return res.status(401).json({ status: "invalid_pin", error: "Incorrect Security PIN." });
 });
 
@@ -86,7 +78,7 @@ app.post('/api/register-orb', (req, res) => {
   res.json({ status: "success" });
 });
 
-// 5. Radar & Canlı Konum Güncelleme
+// 5. Radar & Canlı Konum Güncelleme (Koordinat Destekli)
 app.post('/api/update-live-presence', (req, res) => {
   const { ownerId, onlineAvatars, orbUrl } = req.body;
   if (!ownerId) return res.status(400).json({ error: "Missing ownerId" });
@@ -121,17 +113,21 @@ app.post('/api/record-event', async (req, res) => {
     try {
       const isBreach = (eventType === "breach");
       const isVip = (eventType === "vip_visit");
+      const isBan = (eventType === "blacklist_eject");
       const device = db.devices[ownerId] || { parcelName: "Parcel", region: "Region" };
 
       let title = "🟢 Visitor Detected";
-      let color = 0x00e676; // Yeşil
+      let color = 0x00e676;
 
       if (isBreach) {
         title = "🚨 Intruder Ejected";
-        color = 0xff3b30; // Kırmızı
+        color = 0xff3b30;
+      } else if (isBan) {
+        title = "⛔ Blacklisted Target Neutralized";
+        color = 0x7209b7;
       } else if (isVip) {
         title = "✨ VIP Whitelisted Guest Arrived";
-        color = 0x00e5ff; // Neon Mavi
+        color = 0x00e5ff;
       }
 
       await fetch(webhookUrl.trim(), {
@@ -148,9 +144,9 @@ app.post('/api/record-event', async (req, res) => {
             fields: [
               { name: "Avatar", value: avatarName, inline: true },
               { name: "Location", value: `${device.parcelName} (${device.region})`, inline: true },
-              { name: "Status / Details", value: reason || (isBreach ? "Unauthorized" : "Welcome"), inline: false }
+              { name: "Reason", value: reason || "Auto Defense Execution", inline: false }
             ],
-            footer: { text: "ICE Security Autonomous Defense Grid" },
+            footer: { text: "ICE Security Autonomous Grid" },
             timestamp: new Date().toISOString()
           }]
         })
@@ -198,7 +194,7 @@ app.get('/api/settings', (req, res) => {
     return res.status(401).json({
       status: "auth_required",
       hasPinSet: true,
-      error: "Authentication required. Please enter Security PIN."
+      error: "Authentication required."
     });
   }
 
@@ -217,7 +213,7 @@ app.get('/api/settings', (req, res) => {
   });
 });
 
-// 9. Orb Mikro-Senkronizasyon
+// 9. Orb Mikro-Senkronizasyon (Genişletilmiş Konfigürasyon)
 app.get('/api/orb-sync', (req, res) => {
   const ownerId = req.query.id;
   const orbUrl = req.query.url;
@@ -225,15 +221,11 @@ app.get('/api/orb-sync', (req, res) => {
   
   if (!db.devices[ownerId]) db.devices[ownerId] = {};
   const device = db.devices[ownerId];
-
   if (orbUrl && orbUrl.startsWith("http")) device.orbUrl = orbUrl;
 
   const settings = db.settings[ownerId] || {};
   
-  let cleanWhitelist = [];
-  if (Array.isArray(settings.whitelist)) {
-    cleanWhitelist = settings.whitelist.map(s => String(s).trim().toLowerCase()).filter(s => s.length > 0);
-  }
+  const cleanList = (arr) => Array.isArray(arr) ? arr.map(s => String(s).trim().toLowerCase()).filter(s => s.length > 0) : [];
 
   let kickTarget = "";
   if (device.kickQueue && device.kickQueue.length > 0) {
@@ -246,7 +238,13 @@ app.get('/api/orb-sync', (req, res) => {
     a: settings.action || "eject",
     e: (settings.enableCountdown === 1 || settings.enableCountdown === true) ? 1 : 0,
     c: parseInt(settings.countdown) || 10,
-    w: cleanWhitelist.join("|"),
+    w: cleanList(settings.whitelist).join("|"),
+    b: cleanList(settings.blacklist).join("|"),
+    age: parseInt(settings.minAge) || 0,
+    alt: settings.altitudeMode || "all", // "all", "ground", "skybox"
+    minZ: parseInt(settings.minZ) || 0,
+    maxZ: parseInt(settings.maxZ) || 4000,
+    fx: (settings.enableFx === 0 ? 0 : 1),
     k: kickTarget
   });
 });
@@ -261,7 +259,7 @@ app.post('/api/settings', async (req, res) => {
 
   const existingPin = db.auth[targetId];
   if (existingPin && String(clientPin).trim() !== existingPin) {
-    return res.status(401).json({ status: "auth_required", error: "Invalid PIN. Access denied." });
+    return res.status(401).json({ status: "auth_required", error: "Invalid PIN." });
   }
 
   db.settings[targetId] = settings;
@@ -283,11 +281,11 @@ app.post('/api/settings', async (req, res) => {
   res.json({ status: "success", message: "Saved locally." });
 });
 
-// 11. Discord Webhook Testi (Hatasız & Güvenli İletim)
+// 11. Discord Webhook Testi
 app.post('/api/test-discord', async (req, res) => {
   const { webhookUrl } = req.body;
   if (!webhookUrl || !webhookUrl.includes("discord.com/api/webhooks")) {
-      return res.status(400).json({ error: "Invalid Discord Webhook URL. It must start with https://discord.com/api/webhooks/..." });
+      return res.status(400).json({ error: "Invalid Discord Webhook URL" });
   }
   
   try {
@@ -301,11 +299,11 @@ app.post('/api/test-discord', async (req, res) => {
       body: JSON.stringify({ 
         embeds: [{ 
           title: "🛡️ ICE Security Test Dispatch", 
-          description: "Your Discord webhook integration is functioning perfectly!",
+          description: "Discord webhook integration operational.",
           color: 0x00e5ff,
           fields: [
             { name: "Status", value: "Verified & Connected", inline: true },
-            { name: "System", value: "ICE Security Core v1.0", inline: true }
+            { name: "System", value: "ICE Security Pro v2.0", inline: true }
           ],
           footer: { text: "Autonomous Parcel Defense Grid" },
           timestamp: new Date().toISOString()
@@ -313,15 +311,11 @@ app.post('/api/test-discord', async (req, res) => {
       })
     });
     
-    if (dRes.ok || dRes.status === 204) {
-      return res.json({ status: "success" });
-    }
-
+    if (dRes.ok || dRes.status === 204) return res.json({ status: "success" });
     const errorText = await dRes.text();
     return res.status(400).json({ error: `Discord HTTP ${dRes.status}: ${errorText}` });
   } catch (e) {
-    console.error("Test Discord error:", e);
-    res.status(500).json({ error: "Backend network failed to reach Discord: " + e.message });
+    res.status(500).json({ error: "Backend network failed: " + e.message });
   }
 });
 
